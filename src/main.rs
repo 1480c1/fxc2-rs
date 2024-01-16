@@ -3,19 +3,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::{
-    char, env, error,
+    char, env,
     ffi::{c_void, CStr, CString},
     fs::File,
-    io::Write,
+    io::{Read, Write},
     mem::MaybeUninit,
-    process::{exit, ExitCode},
-    slice,
+    path::Path,
+    process::ExitCode,
 };
 
 use windows::{
-    core::{PCSTR, PCWSTR},
+    core::PCSTR,
     Win32::Graphics::{
-        Direct3D::{Fxc::D3DCompileFromFile, ID3DBlob, ID3DInclude, D3D_SHADER_MACRO},
+        Direct3D::{Fxc::D3DCompile2, ID3DBlob, ID3DInclude, D3D_SHADER_MACRO},
         Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
     },
 };
@@ -178,22 +178,22 @@ fn main() -> ExitCode {
     }
 
     args.parse_one("nologo");
-    let mut model = {
+    let model = {
         if let Some(model) = args.parse_arg("T") {
-            CString::new(model).expect("Failed to parse model")
+            model
         } else {
             return print_usage_missing("model");
         }
     };
-    let mut entry_point = {
+    let entry_point = {
         if let Some(entry_point) = args.parse_arg("E") {
-            CString::new(entry_point).expect("Failed to parse entry point")
+            entry_point
         } else {
             return print_usage_missing("entryPoint");
         }
     };
-    let mut variable_name = args.parse_arg("Vn");
-    let mut output_file = {
+    let variable_name = args.parse_arg("Vn");
+    let output_file = {
         if let Some(output_file) = args.parse_arg("Fh") {
             output_file
         } else {
@@ -204,33 +204,30 @@ fn main() -> ExitCode {
         println!("option {arg} (Output include process details) acknowledged but ignored");
     }
     let mut defines: Vec<(CString, CString)> = Vec::new();
+    let mut d3d_defines: Vec<D3D_SHADER_MACRO> = Vec::new();
     while let Some(arg) = args.parse_arg("D") {
         // We can't construct D3D_SHADER_MACRO directly due to lifetime issues
-        // store the defines for now and construct them after
         let mut define = arg.split('=');
-        let name: CString =
-            CString::new(define.next().unwrap()).expect("Failed to parse define name");
-        let value: CString =
+        let name = CString::new(define.next().unwrap()).expect("Failed to parse define name");
+        let value =
             CString::new(define.next().unwrap_or("1")).expect("Failed to parse define value");
+        let define = D3D_SHADER_MACRO {
+            Name: PCSTR(name.as_bytes_with_nul().as_ptr()),
+            Definition: PCSTR(value.as_bytes_with_nul().as_ptr()),
+        };
         defines.push((name, value));
-    }
-    // Now that we have the strings stored, we can construct the D3D_SHADER_MACRO array
-    let mut d3d_defines: Vec<D3D_SHADER_MACRO> = Vec::new();
-    for (name, value) in defines.iter() {
-        let mut define = D3D_SHADER_MACRO::default();
-        define.Name = PCSTR(name.as_bytes_with_nul().as_ptr());
-        define.Definition = PCSTR(value.as_bytes_with_nul().as_ptr());
         d3d_defines.push(define);
     }
     d3d_defines.push(D3D_SHADER_MACRO::default()); // null terminator
 
     let input_file = {
         if let Some(input_file) = args.get() {
-            input_file.encode_utf16().collect::<Vec<u16>>()
+            input_file
         } else {
             return print_usage_missing("inputFile");
         }
     };
+    let input_file = Path::new(&input_file);
 
     if !args.end() {
         eprintln!("fxc2: Unhandled arguments:");
@@ -241,20 +238,14 @@ fn main() -> ExitCode {
     }
 
     // Default output variable name
-    if variable_name.is_none() {
-        let model = model.to_str().unwrap();
-        for i in PROFILE_PREFIX_TABLE.iter() {
-            if i.name == model {
-                variable_name = Some(format!("{}_{}", i.prefix, entry_point.to_str().unwrap()));
-                break;
-            }
-        }
-    }
-    // if the model doesn't match any from our table, use g_ as the prefix
-    if variable_name.is_none() {
-        variable_name = Some(format!("g_{}", entry_point.to_str().unwrap()));
-    }
-    let variable_name = variable_name.unwrap();
+    let variable_name = if let Some(variable_name) = variable_name {
+        variable_name
+    } else if let Some(name) = PROFILE_PREFIX_TABLE.iter().find(|i| i.name == model) {
+        format!("{}_{entry_point}", name.prefix)
+    } else {
+        // if the model doesn't match any from our table, use g_ as the prefix
+        format!("g_{entry_point}")
+    };
 
     eprintln!("option -T (Shader Model/Profile) with arg '{:?}'", model);
     eprintln!("option -E (Entry Point) with arg '{:?}'", entry_point);
@@ -271,32 +262,79 @@ fn main() -> ExitCode {
         std::mem::transmute::<_, &ID3DInclude>(&(D3D_COMPILE_STANDARD_FILE_INCLUDE as usize))
     };
 
-    eprintln!("Calling D3DCompileFromFile(");
-    eprintln!("\t{},", String::from_utf16(&input_file).unwrap());
+    let input = {
+        let mut file = File::open(&input_file).expect("Failed to open input file");
+        let len = file
+            .metadata()
+            .expect("Failed to get input file metadata")
+            .len();
+        let mut data = Vec::with_capacity(len as usize);
+        file.read_to_end(&mut data)
+            .expect("Failed to read input file");
+        data
+    };
+    /*
+    HRESULT D3DCompile2(
+    [in]            LPCVOID                pSrcData,
+    [in]            SIZE_T                 SrcDataSize,
+    [in, optional]  LPCSTR                 pSourceName,
+    [in, optional]  const D3D_SHADER_MACRO *pDefines,
+    [in, optional]  ID3DInclude            *pInclude,
+    [in]            LPCSTR                 pEntrypoint,
+    [in]            LPCSTR                 pTarget,
+    [in]            UINT                   Flags1,
+    [in]            UINT                   Flags2,
+    [in]            UINT                   SecondaryDataFlags,
+    [in, optional]  LPCVOID                pSecondaryData,
+    [in]            SIZE_T                 SecondaryDataSize,
+    [out]           ID3DBlob               **ppCode,
+    [out, optional] ID3DBlob               **ppErrorMsgs
+    );
+    */
+
+    eprintln!("Calling D3DCompile2(");
+    eprintln!("\t{:p},", input.as_ptr());
+    eprintln!("\t{},", input.len());
+    eprintln!("\t{},", input_file.file_name().unwrap().to_str().unwrap());
     eprintln!("\t{:?},", d3d_defines);
     eprintln!("\tD3D_COMPILE_STANDARD_FILE_INCLUDE,");
-    eprintln!("\t{},", entry_point.to_str().unwrap());
-    eprintln!("\t{},", model.to_str().unwrap());
+    eprintln!("\t{},", entry_point);
+    eprintln!("\t{},", model);
     eprintln!("\t0,");
+    eprintln!("\t0,");
+    eprintln!("\t0,");
+    eprintln!("\tNULL,");
     eprintln!("\t0,");
     eprintln!("\t{:p},", output.as_mut_ptr());
     eprintln!("\t{:p})", errors.as_mut_ptr());
 
+    let file_name = {
+        let file_name = input_file.file_name().unwrap().as_encoded_bytes();
+        CString::new(file_name).unwrap()
+    };
+    let entry_point = CString::new(entry_point).unwrap();
+    let model: CString = CString::new(model).unwrap();
+
     let hr = unsafe {
-        D3DCompileFromFile(
-            PCWSTR(input_file.as_ptr()),
+        D3DCompile2(
+            input.as_ptr() as *const c_void,
+            input.len(),
+            PCSTR::from_raw(file_name.as_bytes_with_nul().as_ptr() as *const u8),
             Some(d3d_defines.as_ptr()),
             include,
             PCSTR(entry_point.as_bytes_with_nul().as_ptr()),
             PCSTR(model.as_bytes_with_nul().as_ptr()),
             0,
             0,
+            0,
+            None,
+            0,
             output.as_mut_ptr(),
             Some(errors.as_mut_ptr()),
         )
     };
 
-    let (output, errors) = unsafe { (output.assume_init(), errors.assume_init()) };
+    let (output, errors) = unsafe { (output.assume_init().unwrap(), errors.assume_init()) };
 
     if hr.is_err() {
         if let Some(errors) = errors {
@@ -308,8 +346,6 @@ fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-
-    let output = output.unwrap();
 
     let data = unsafe {
         let out_string = output.GetBufferPointer() as *const u8;
