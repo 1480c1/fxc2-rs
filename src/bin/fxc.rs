@@ -464,31 +464,31 @@ fn write_output(
     output_file: String,
     variable_name: String,
 ) -> Result<(), std::io::Error> {
-    let data: &[u8] = unsafe {
-        let out_string = output.GetBufferPointer() as *const u8;
-        let len = output.GetBufferSize();
-        slice::from_raw_parts(out_string, len)
+    // Required to ensure crlf output as rust does not do the same conversions
+    // that msvcrt does
+    const NL: &str = "\r\n";
+
+    // valid until output is released
+    let data: &[i8] = unsafe {
+        slice::from_raw_parts(
+            output.GetBufferPointer() as *const i8,
+            output.GetBufferSize(),
+        )
     };
 
-    let mut file = File::create(output_file.clone()).expect("Failed to create output file");
+    let mut file = File::create(&output_file).expect("Failed to create output file");
 
-    write!(file, "const BYTE {variable_name}[] =\n{{\n")?;
+    write!(file, "const BYTE {variable_name}[] ={NL}{{{NL}")?;
     for (i, byte) in data.iter().enumerate() {
-        let byte = *byte as i8;
-        write!(
-            file,
-            "{:4}{}",
-            byte,
-            if i != data.len() - 1 {
-                ","
-            } else if i % 6 == 5 {
-                "\n"
-            } else {
-                ""
-            }
-        )?;
+        write!(file, "{:4}", byte)?;
+        if i != data.len() - 1 {
+            file.write(b",")?;
+        }
+        if i % 6 == 5 {
+            file.write(NL.as_bytes())?;
+        }
     }
-    write!(file, "\n}};")?;
+    write!(file, "{NL}}};")?;
 
     eprintln!(
         "Wrote {} bytes of shader output to {}",
