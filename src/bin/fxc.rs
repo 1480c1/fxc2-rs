@@ -9,7 +9,6 @@ use std::{
     fmt,
     fs::File,
     io::{Read, Write},
-    mem::MaybeUninit,
     process::ExitCode,
     slice,
 };
@@ -409,8 +408,6 @@ impl ParseOpt {
         let file_name = CString::new(self.input_file).unwrap();
         let model = CString::new(self.model).unwrap();
 
-        let mut data: MaybeUninit<Option<ID3DBlob>> = MaybeUninit::uninit();
-        let mut errors: MaybeUninit<Option<ID3DBlob>> = MaybeUninit::uninit();
         let mut output: CompileOutput = Default::default();
 
         // eprintln!("Calling D3DCompile2(");
@@ -443,18 +440,10 @@ impl ParseOpt {
                 0,
                 None,
                 0,
-                data.as_mut_ptr(),
-                Some(errors.as_mut_ptr()),
+                &mut output.data,
+                Some(&mut output.errors),
             )
         };
-        if hr.is_err() {
-            if let Some(errors) = unsafe { errors.assume_init() } {
-                output.errors = Some(errors);
-            }
-            return (hr, output);
-        }
-
-        output.data = Some(unsafe { data.assume_init() }.unwrap());
         (hr, output)
     }
 }
