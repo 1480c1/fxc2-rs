@@ -188,13 +188,13 @@ enum Opts {
 impl Opts {
     /// Parses the first argument. If the argument requires an argument, and it is not already attached to the first, the next argument is used.
     /// Returns true if the second argument was used.
-    fn parse(first: &str, second: Option<&str>) -> Result<(Opts, bool), UsageError> {
+    fn parse(first: &str, args: &mut VecDeque<String>) -> Result<Opts, UsageError> {
         let first_char = first.chars().next().unwrap();
         match first.len() {
             0 => panic!("Empty argument"),
             1 | _ if first_char != '-' && first_char != '/' => {
                 // not an option, assume it's the input file
-                return Ok((Opts::InputFile(first.to_owned()), false));
+                return Ok(Opts::InputFile(first.to_owned()));
             }
             _ => {}
         }
@@ -202,36 +202,33 @@ impl Opts {
         let mut first = &first[1..];
         // handle no-arg options
         match first {
-            "?" | "help" => return Ok((Opts::Help, false)),
-            "all_resources_bound" => return Ok((Opts::AllResourcesBound, false)),
-            "enable_unbounded_descriptor_tables" => {
-                return Ok((Opts::UnboundedDescriptorTables, false))
-            }
-            "Gec" => return Ok((Opts::BackwardsCompatibility, false)),
-            "Ges" => return Ok((Opts::EnableStrictness, false)),
-            "Gfa" => return Ok((Opts::AvoidFlowControl, false)),
-            "Gis" => return Ok((Opts::EnableIEEEStrictness, false)),
-            "Gpp" => return Ok((Opts::PartialPrecision, false)),
-            "nologo" => return Ok((Opts::NoLogo, false)),
-            "Od" => return Ok((Opts::DisableOptimizations, false)),
-            "Op" => return Ok((Opts::DisablePreshaders, false)),
-            "O0" => return Ok((Opts::OptimizationLevel0, false)),
-            "O1" => return Ok((Opts::OptimizationLevel1, false)),
-            "O2" => return Ok((Opts::OptimizationLevel2, false)),
-            "O3" => return Ok((Opts::OptimizationLevel3, false)),
-            "res_may_alias" => return Ok((Opts::ResourceMayAlias, false)),
-            "Vd" => return Ok((Opts::SkipValidation, false)),
-            "Vi" => return Ok((Opts::OutputIncludeProcessDetails, false)),
-            "WX" => return Ok((Opts::WarningsAsErrors, false)),
-            "Zi" => return Ok((Opts::DebugInformation, false)),
-            "Zpc" => return Ok((Opts::PackMatrixColumnMajor, false)),
-            "Zpr" => return Ok((Opts::PackMatrixRowMajor, false)),
+            "?" | "help" => return Ok(Opts::Help),
+            "all_resources_bound" => return Ok(Opts::AllResourcesBound),
+            "enable_unbounded_descriptor_tables" => return Ok(Opts::UnboundedDescriptorTables),
+            "Gec" => return Ok(Opts::BackwardsCompatibility),
+            "Ges" => return Ok(Opts::EnableStrictness),
+            "Gfa" => return Ok(Opts::AvoidFlowControl),
+            "Gis" => return Ok(Opts::EnableIEEEStrictness),
+            "Gpp" => return Ok(Opts::PartialPrecision),
+            "nologo" => return Ok(Opts::NoLogo),
+            "Od" => return Ok(Opts::DisableOptimizations),
+            "Op" => return Ok(Opts::DisablePreshaders),
+            "O0" => return Ok(Opts::OptimizationLevel0),
+            "O1" => return Ok(Opts::OptimizationLevel1),
+            "O2" => return Ok(Opts::OptimizationLevel2),
+            "O3" => return Ok(Opts::OptimizationLevel3),
+            "res_may_alias" => return Ok(Opts::ResourceMayAlias),
+            "Vd" => return Ok(Opts::SkipValidation),
+            "Vi" => return Ok(Opts::OutputIncludeProcessDetails),
+            "WX" => return Ok(Opts::WarningsAsErrors),
+            "Zi" => return Ok(Opts::DebugInformation),
+            "Zpc" => return Ok(Opts::PackMatrixColumnMajor),
+            "Zpr" => return Ok(Opts::PackMatrixRowMajor),
             _ => {}
         }
         // handle options with arguments.
         // First check if the argument is attached to the option
         let mut argument: String = String::new();
-        let mut used_second = false;
         const ARG_PREFIX: [&str; 5] = ["T", "D", "E", "Fh", "Vn"];
         for prefix in ARG_PREFIX.iter() {
             if !first.starts_with(prefix) {
@@ -243,31 +240,27 @@ impl Opts {
                 argument = arg.to_owned();
                 break;
             }
-            if let Some(second) = second {
-                argument = second.to_owned();
-                used_second = true;
+            if let Some(second) = args.pop_front() {
+                argument = second;
                 break;
             }
             return Err(UsageError::MissingArgument(first.to_owned()));
         }
         match first {
-            "T" => Ok((Opts::Model(argument), used_second)),
+            "T" => Ok(Opts::Model(argument)),
             "D" => {
                 let mut define = argument.split('=');
                 let name =
                     CString::new(define.next().unwrap()).expect("Failed to parse define name");
                 let value = CString::new(define.next().unwrap_or("1"))
                     .expect("Failed to parse define value");
-                Ok((Opts::Define(name, value), used_second))
+                Ok(Opts::Define(name, value))
             }
-            "E" => Ok((
-                Opts::EntryPointName(
-                    CString::new(argument).expect("Failed to parse entry point name"),
-                ),
-                used_second,
+            "E" => Ok(Opts::EntryPointName(
+                CString::new(argument).expect("Failed to parse entry point name"),
             )),
-            "Fh" => Ok((Opts::OutputFile(argument), used_second)),
-            "Vn" => Ok((Opts::VariableName(argument), used_second)),
+            "Fh" => Ok(Opts::OutputFile(argument)),
+            "Vn" => Ok(Opts::VariableName(argument)),
             _ => Err(UsageError::UnknownArgument(first.to_owned())),
         }
     }
@@ -307,18 +300,12 @@ impl ParseOpt {
         let mut n_variable_name = String::new();
         let mut n_output_file = String::new();
         let mut n_defines = Vec::new();
-        let mut n_d3d_defines = Vec::new();
         let mut n_input_file = String::new();
         let mut n_flags1 = 0;
 
         while !args.is_empty() {
             let first = args.pop_front().unwrap();
-            let second = args.front();
-            let (opt, used_second) = Opts::parse(&first, second.map(|x| x.as_str()))?;
-            if used_second {
-                args.pop_front();
-            }
-            match opt {
+            match Opts::parse(&first, &mut args)? {
                 Opts::Model(model) => n_model = model,
                 Opts::Help => {
                     return Err(UsageError::HelpRequested);
@@ -365,26 +352,25 @@ impl ParseOpt {
 
         // Default initalization and others
         n_defines.shrink_to_fit();
-        n_d3d_defines.reserve(n_defines.len() + 1);
-        for (name, value) in n_defines.iter() {
-            let name = PCSTR(name.as_bytes_with_nul().as_ptr());
-            let value = PCSTR(value.as_bytes_with_nul().as_ptr());
+        let mut n_d3d_defines = Vec::with_capacity(n_defines.len() + 1);
+        n_defines.iter().for_each(|(name, value)| {
             n_d3d_defines.push(D3D_SHADER_MACRO {
-                Name: name,
-                Definition: value,
-            });
-        }
+                Name: PCSTR(name.as_bytes_with_nul().as_ptr()),
+                Definition: PCSTR(value.as_bytes_with_nul().as_ptr()),
+            })
+        });
         n_d3d_defines.push(D3D_SHADER_MACRO::default()); // null terminator
 
         if n_variable_name.is_empty() {
             let entry_point = n_entry_point.to_str().unwrap();
             let model_name = n_model.as_str();
-            if let Some(name) = PROFILE_PREFIX_TABLE.iter().find(|i| i.name == model_name) {
-                n_variable_name = format!("{}_{entry_point}", name.prefix);
-            } else {
-                // if the model doesn't match any from our table, use g_ as the prefix
-                n_variable_name = format!("g_{entry_point}");
-            }
+            // if the model doesn't match any from our table, use g_ as the prefix
+            let prefix = PROFILE_PREFIX_TABLE
+                .iter()
+                .find(|i| i.name == model_name)
+                .map(|i| i.prefix)
+                .unwrap_or("g");
+            n_variable_name = format!("{prefix}_{entry_point}");
         }
 
         eprintln!("option -T (Shader Model/Profile) with arg '{n_model}'",);
@@ -399,7 +385,6 @@ impl ParseOpt {
             entry_point: n_entry_point,
             variable_name: n_variable_name,
             output_file: n_output_file,
-            // defines: n_defines,
             d3d_defines: n_d3d_defines,
             input_file: n_input_file,
             flags1: n_flags1,
